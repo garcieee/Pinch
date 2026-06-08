@@ -34,6 +34,23 @@ html, body, #root {
   pointer-events: none;
 }
 
+.shutter-flash {
+  position: absolute;
+  inset: 0;
+  background: white;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.shutter-flash.active {
+  animation: shutter 0.4s ease-out forwards;
+}
+
+@keyframes shutter {
+  0%   { opacity: 0.85; }
+  100% { opacity: 0; }
+}
+
 .camera-error {
   position: absolute;
   top: 50%;
