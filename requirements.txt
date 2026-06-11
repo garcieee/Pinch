@@ -1,2 +1,6 @@
-opencv-python
-mediapipe
+# Verified working on Python 3.14.0 / macOS (arm64)
+# mediapipe ships py3-none-any wheels from 0.10.x onward — no strict Python cap
+# opencv-python pinned to installed version; update to 4.13.x when stable on your env
+
+opencv-python==4.12.0.88
+mediapipe==0.10.35
