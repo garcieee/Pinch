@@ -1,5 +1,7 @@
 # Frame + bounding box → cropped image (pure)
 
+import os
+import cv2
 import numpy as np
 
 
@@ -19,3 +21,12 @@ def extract_crop(frame: np.ndarray, rect_norm: dict) -> np.ndarray:
     if x2 <= x1 or y2 <= y1:
         return np.zeros((1, 1, 3), dtype=np.uint8)
     return frame[y1:y2, x1:x2].copy()
+
+
+def save_crop(image: np.ndarray, index: int,
+              directory: str = "/tmp/pinch_caps") -> str:
+    """Write cropped image to disk. Returns the file path."""
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, f"CAP_{index:03d}.png")
+    cv2.imwrite(path, image)
+    return path

@@ -14,15 +14,23 @@ def make_state(cam_index: int = 0, cam_width: int = 1280, cam_height: int = 720,
         "cam_width":       cam_width,
         "cam_height":      cam_height,
         "cam_fps":         cam_fps,
+        # mode
+        "mode":            "snap",       # "snap" | "play"
+        "mode_flash_frame": -100,        # frame_count at last mode toggle
         # gesture
         "gesture":         "idle",
         "hands_count":     0,
-        "framing_rect":    None,    # {"x","y","w","h"} normalized 0..1
-        "thumb_tips":      [],      # [{"x","y"}, ...] normalized
+        "framing_rect":    None,         # {"x","y","w","h"} normalized 0..1
+        "locked_rect":     None,         # stable framing rect preserved for capture
+        "thumb_tips":      [],           # [{"x","y"}, ...] normalized
         "index_tips":      [],
+        "pinch_midpoint":  None,         # {"x","y"} normalized
+        "palm_center":     None,         # {"x","y"} normalized
+        # palm hold for mode toggle
+        "palm_charge_start": None,       # time.time() when palm gesture began
         # stability
         "stable_frames":   0,
-        "lock_threshold":  9,       # ~0.3s at 30fps
+        "lock_threshold":  15,           # ~0.5s at 30fps
         "lock_in_secs":    None,
         "prev_rect":       None,
         # flash
@@ -30,12 +38,12 @@ def make_state(cam_index: int = 0, cam_width: int = 1280, cam_height: int = 720,
         # captures
         "caps_count":      0,
         "last_snap_frame": -30,
-        # function key row
-        "fkey_timer":      0.0,
+        # legend visibility
+        "legend_timer":    0.0,
         # cards
         "cards":           [],
         "drag_card_id":    None,
-        "drag_offset":     None,    # {"dx","dy"}
+        "drag_offset":     None,         # {"dx","dy"}
     }
 
 
@@ -43,14 +51,20 @@ def update_state(state: dict, event: dict) -> dict:
     t = event["type"]
 
     if t == "gesture_update":
-        return {
+        new = {
             **state,
-            "gesture":      event["gesture"],
-            "hands_count":  event["hands_count"],
-            "framing_rect": event["framing_rect"],
-            "thumb_tips":   event["thumb_tips"],
-            "index_tips":   event["index_tips"],
+            "gesture":        event["gesture"],
+            "hands_count":    event["hands_count"],
+            "framing_rect":   event["framing_rect"],
+            "thumb_tips":     event["thumb_tips"],
+            "index_tips":     event["index_tips"],
+            "pinch_midpoint": event.get("pinch_midpoint"),
+            "palm_center":    event.get("palm_center"),
         }
+        # Clear locked_rect when gesture drops to idle
+        if event["gesture"] == "idle":
+            new["locked_rect"] = None
+        return new
 
     if t == "snap":
         caps = state["caps_count"] + 1
@@ -58,7 +72,7 @@ def update_state(state: dict, event: dict) -> dict:
         ts = time.strftime("%H:%M:%S")
         w = event.get("frame_w", state["cam_width"])
         h = event.get("frame_h", state["cam_height"])
-        rect = state["framing_rect"]
+        rect = state["locked_rect"] or state["framing_rect"]
         if rect:
             sx = int(rect["x"] * w)
             sy = int(rect["y"] * h)
@@ -81,6 +95,7 @@ def update_state(state: dict, event: dict) -> dict:
             "last_snap_frame": state["frame_count"],
             "flash_frames":    4,
             "gesture":         "idle",
+            "locked_rect":     None,
             "cards":           state["cards"] + [card],
         }
 
@@ -92,20 +107,37 @@ def update_state(state: dict, event: dict) -> dict:
     if t == "stable_tick":
         new_rect = event.get("new_rect")
         prev_rect = state.get("prev_rect")
+        locked = state.get("locked_rect")
         if new_rect is None:
-            return {**state, "stable_frames": 0, "lock_in_secs": None, "prev_rect": None}
-        moved = _rect_moved(prev_rect, new_rect, threshold=0.02)
+            return {**state, "stable_frames": 0, "lock_in_secs": None,
+                    "prev_rect": None, "locked_rect": None}
+        moved = _rect_moved(prev_rect, new_rect, threshold=0.008)
         stable = 0 if moved else state["stable_frames"] + 1
         threshold = state["lock_threshold"]
         fps = state["cam_fps"] or 30.0
-        if stable < threshold:
-            lock_in_secs = round((threshold - stable) / fps, 1)
-        else:
+        if stable >= threshold:
             lock_in_secs = None
-        return {**state, "stable_frames": stable, "lock_in_secs": lock_in_secs, "prev_rect": new_rect}
+            if locked is None:
+                locked = new_rect
+        else:
+            lock_in_secs = round((threshold - stable) / fps, 1)
+            # preserve locked_rect through pinch transition
+        return {**state, "stable_frames": stable, "lock_in_secs": lock_in_secs,
+                "prev_rect": new_rect, "locked_rect": locked}
 
-    if t == "fkey_trigger":
-        return {**state, "fkey_timer": time.time()}
+    if t == "palm_charge_start":
+        return {**state, "palm_charge_start": time.time()}
+
+    if t == "palm_charge_reset":
+        return {**state, "palm_charge_start": None}
+
+    if t == "mode_toggle":
+        new_mode = "play" if state["mode"] == "snap" else "snap"
+        return {**state, "mode": new_mode, "palm_charge_start": None,
+                "mode_flash_frame": state["frame_count"]}
+
+    if t == "legend_trigger":
+        return {**state, "legend_timer": time.time()}
 
     if t == "card_drag_start":
         return {

@@ -58,6 +58,20 @@ def get_card_pos(card: dict, frame_count: int) -> tuple:
     return _lerp_pos(card, frame_count)
 
 
+def get_card_at(cards: list, px: int, py: int, frame_count: int) -> dict | None:
+    """Hit test: return top-most card at pixel (px, py), or None."""
+    for card in reversed(cards):
+        pos = _lerp_pos(card, frame_count)
+        if hit_test_card_body(card, pos, px, py):
+            return card
+    return None
+
+
+def move_card(card: dict, new_pos: tuple) -> dict:
+    """Pure: return card with updated position."""
+    return {**card, "pos": new_pos, "rest_pos": new_pos}
+
+
 # ---------------------------------------------------------------------------
 # Private
 # ---------------------------------------------------------------------------

@@ -2,6 +2,7 @@
 
 import sys
 import os
+import time
 
 # Allow running as `python src/main.py` from the project root
 sys.path.insert(0, os.path.dirname(__file__))
@@ -13,10 +14,12 @@ from mediapipe.tasks.python.vision import HandLandmarker, HandLandmarkerOptions,
 
 from camera import open_camera, read_frame, release_camera
 from state import make_state, update_state
-from gestures import classify_gesture, get_framing_rect, get_fingertip_positions, get_hands_count
-from overlay import apply_base_style, draw_crop_rect, draw_fingertip_markers, apply_shutter_flash
-from cards import render_cards, hit_test_delete_btn, hit_test_card_body, get_card_pos
-from crop import extract_crop
+from gestures import (classify_gesture, get_framing_rect, get_fingertip_positions,
+                      get_hands_count, get_pinch_midpoint, get_palm_center)
+from overlay import (apply_base_style, draw_crop_rect, draw_fingertip_markers,
+                     draw_charge_arc, apply_shutter_flash)
+from cards import render_cards, hit_test_delete_btn, hit_test_card_body, get_card_pos, get_card_at
+from crop import extract_crop, save_crop
 
 WINDOW = "Pinch"
 
@@ -46,7 +49,6 @@ def main() -> None:
         nonlocal state
         fc = state["frame_count"]
         if event == cv2.EVENT_LBUTTONDOWN:
-            # Hit-test top card first (last in list = drawn on top)
             for card in reversed(state["cards"]):
                 pos = get_card_pos(card, fc)
                 if hit_test_delete_btn(card, pos, mx, my):
@@ -55,7 +57,6 @@ def main() -> None:
                 if hit_test_card_body(card, pos, mx, my):
                     dx = mx - pos[0]
                     dy = my - pos[1]
-                    # Sync pos to current animated position before dragging
                     cards = [
                         {**c, "pos": pos, "rest_pos": pos} if c["id"] == card["id"] else c
                         for c in state["cards"]
@@ -90,22 +91,38 @@ def main() -> None:
             new_rect       = get_framing_rect(results)
             thumb_t, idx_t = get_fingertip_positions(results)
             hands_n        = get_hands_count(results)
+            pinch_mid      = get_pinch_midpoint(results)
+            palm_ctr       = get_palm_center(results)
 
-            # --- State updates ---
+            # --- Gesture update ---
             state = update_state(state, {
-                "type":         "gesture_update",
-                "gesture":      new_gesture,
-                "hands_count":  hands_n,
-                "framing_rect": new_rect,
-                "thumb_tips":   thumb_t,
-                "index_tips":   idx_t,
+                "type":           "gesture_update",
+                "gesture":        new_gesture,
+                "hands_count":    hands_n,
+                "framing_rect":   new_rect,
+                "thumb_tips":     thumb_t,
+                "index_tips":     idx_t,
+                "pinch_midpoint": pinch_mid,
+                "palm_center":    palm_ctr,
             })
 
-            # Snap on pinch (with debounce)
-            if (new_gesture == "pinch"
-                    and state["framing_rect"] is not None
+            # --- Palm hold → mode toggle ---
+            if new_gesture == "palm":
+                if state["palm_charge_start"] is None:
+                    state = update_state(state, {"type": "palm_charge_start"})
+                elif (time.time() - state["palm_charge_start"]) >= 1.0:
+                    state = update_state(state, {"type": "mode_toggle"})
+            else:
+                if state["palm_charge_start"] is not None:
+                    state = update_state(state, {"type": "palm_charge_reset"})
+
+            # --- SNAP mode: capture on dual pinch with locked rect ---
+            if (state["mode"] == "snap"
+                    and new_gesture == "pinch"
+                    and state["locked_rect"] is not None
                     and state["frame_count"] - state["last_snap_frame"] > 20):
-                crop_img = extract_crop(frame, state["framing_rect"])
+                crop_img = extract_crop(frame, state["locked_rect"])
+                save_crop(crop_img, state["caps_count"] + 1)
                 state = update_state(state, {
                     "type":    "snap",
                     "image":   crop_img,
@@ -113,11 +130,37 @@ def main() -> None:
                     "frame_h": h,
                 })
 
+            # --- PLAY mode: hand pinch grab/drag/release ---
+            if state["mode"] == "play":
+                if new_gesture == "single_pinch" and pinch_mid is not None:
+                    px_x = int(pinch_mid["x"] * w)
+                    px_y = int(pinch_mid["y"] * h)
+                    if state["drag_card_id"] is None:
+                        card = get_card_at(state["cards"], px_x, px_y, state["frame_count"])
+                        if card is not None:
+                            pos = get_card_pos(card, state["frame_count"])
+                            dx = px_x - pos[0]
+                            dy = px_y - pos[1]
+                            cards = [
+                                {**c, "pos": pos, "rest_pos": pos} if c["id"] == card["id"] else c
+                                for c in state["cards"]
+                            ]
+                            state = {**state, "cards": cards}
+                            state = update_state(state, {
+                                "type": "card_drag_start", "id": card["id"],
+                                "dx": dx, "dy": dy,
+                            })
+                    else:
+                        state = update_state(state, {"type": "card_drag_move", "mx": px_x, "my": px_y})
+                elif state["drag_card_id"] is not None and new_gesture != "single_pinch":
+                    state = update_state(state, {"type": "card_drag_end"})
+
+            # --- Ticks ---
             state = update_state(state, {"type": "flash_tick"})
             state = update_state(state, {"type": "stable_tick", "new_rect": new_rect})
 
             if hands_n > 0:
-                state = update_state(state, {"type": "fkey_trigger"})
+                state = update_state(state, {"type": "legend_trigger"})
 
             state = {**state, "frame_count": state["frame_count"] + 1}
 
@@ -125,6 +168,7 @@ def main() -> None:
             frame = apply_base_style(frame, state)
             frame = draw_crop_rect(frame, state)
             frame = draw_fingertip_markers(frame, state)
+            frame = draw_charge_arc(frame, state)
             frame = render_cards(frame, state)
             frame = apply_shutter_flash(frame, state)
 
@@ -134,8 +178,6 @@ def main() -> None:
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
                 break
-            if key in (ord("1"), ord("2"), ord("3"), ord("x"), ord("X")):
-                state = update_state(state, {"type": "fkey_trigger"})
             if key in (ord("x"), ord("X")):
                 state = update_state(state, {"type": "purge_cards"})
 

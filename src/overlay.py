@@ -1,4 +1,4 @@
-# Draw crop rectangle, landmarks, and shutter flash onto frame (pure)
+# Draw crop rectangle, landmarks, charge arc, HUD, and shutter flash onto frame (pure)
 
 import time
 import cv2
@@ -29,13 +29,15 @@ def apply_base_style(frame: np.ndarray, state: dict) -> np.ndarray:
     _draw_top_left_info(out, state)
     _draw_top_right_info(out, state, w)
     _draw_bottom_left_tc(out, state, h)
-    if (time.time() - state["fkey_timer"]) < 3.0:
-        _draw_fkey_row(out, state, w, h)
+    if (time.time() - state["legend_timer"]) < 3.0:
+        _draw_gesture_legend(out, state, w, h)
     return out
 
 
 def draw_crop_rect(frame: np.ndarray, state: dict) -> np.ndarray:
-    """Draw crop rectangle + corner crosshairs + labels. Pure."""
+    """Draw crop rectangle + corner crosshairs + labels. Pure. SNAP mode only."""
+    if state["mode"] != "snap":
+        return frame
     if state["gesture"] != "framing" or state["framing_rect"] is None:
         return frame
     out = frame.copy()
@@ -92,6 +94,32 @@ def draw_fingertip_markers(frame: np.ndarray, state: dict) -> np.ndarray:
     return out
 
 
+def draw_charge_arc(frame: np.ndarray, state: dict) -> np.ndarray:
+    """Draw thin amber arc around palm during mode-toggle hold. Pure."""
+    if state["palm_charge_start"] is None:
+        return frame
+    palm = state.get("palm_center")
+    if palm is None:
+        return frame
+    out = frame.copy()
+    h, w = out.shape[:2]
+    cx = int(palm["x"] * w)
+    cy = int(palm["y"] * h)
+    elapsed = time.time() - state["palm_charge_start"]
+    charge = min(1.0, elapsed / 1.0)
+    end_angle = int(charge * 360)
+    radius = 40
+    # Arc sweeps clockwise from 12-o'clock (-90 degrees)
+    cv2.ellipse(out, (cx, cy), (radius, radius), -90, 0, end_angle, C_AMBER, 1, cv2.LINE_AA)
+
+    # Label: "PLAY IN 00.4s" or "SNAP IN 00.4s"
+    target_mode = "PLAY" if state["mode"] == "snap" else "SNAP"
+    remaining = max(0.0, 1.0 - elapsed)
+    label = f"{target_mode} IN {remaining:04.1f}s"
+    cv2.putText(out, label, (cx + radius + 6, cy + 4), FONT, FS_SM, C_AMBER, 1, cv2.LINE_AA)
+    return out
+
+
 def apply_shutter_flash(frame: np.ndarray, state: dict) -> np.ndarray:
     """Blend white flash over frame based on flash_frames counter. Pure."""
     ff = state["flash_frames"]
@@ -113,11 +141,8 @@ def _draw_ruler_ticks(out: np.ndarray, h: int, w: int) -> None:
     step = 80
     x = 0
     while x <= w:
-        # Top edge — ticks hang downward
         cv2.line(out, (x, 0), (x, major_h), C_BORDER_I, 1)
-        # Bottom edge — ticks extend upward
         cv2.line(out, (x, h - 1), (x, h - 1 - major_h), C_BORDER_I, 1)
-        # Minor ticks between major ticks
         for sub in (16, 32, 48, 64):
             mx = x + sub
             if mx >= w:
@@ -140,25 +165,33 @@ def _draw_top_left_info(out: np.ndarray, state: dict) -> None:
 def _draw_top_right_info(out: np.ndarray, state: dict, w: int) -> None:
     margin = 8
 
-    # Line 1: HANDS  02/02
-    key1 = "HANDS  "
-    val1 = f"{state['hands_count']:02d}/02"
-    (kw1, _), _ = cv2.getTextSize(key1, FONT, FS_MED, 1)
-    (vw1, _), _ = cv2.getTextSize(val1, FONT, FS_MED, 1)
-    x1_v = w - margin - vw1
-    x1_k = x1_v - kw1
-    cv2.putText(out, key1, (x1_k, 22), FONT, FS_MED, C_GRAY_L, 1, cv2.LINE_AA)
-    cv2.putText(out, val1, (x1_v, 22), FONT, FS_MED, C_AMBER, 1, cv2.LINE_AA)
+    # Line 1: HANDS 02/02
+    _draw_kv_right(out, "HANDS  ", f"{state['hands_count']:02d}/02", w, margin, 22)
 
-    # Line 2: STATE  FRAMING
-    key2 = "STATE  "
-    val2 = state["gesture"].upper()
-    (kw2, _), _ = cv2.getTextSize(key2, FONT, FS_MED, 1)
-    (vw2, _), _ = cv2.getTextSize(val2, FONT, FS_MED, 1)
-    x2_v = w - margin - vw2
-    x2_k = x2_v - kw2
-    cv2.putText(out, key2, (x2_k, 38), FONT, FS_MED, C_GRAY_L, 1, cv2.LINE_AA)
-    cv2.putText(out, val2, (x2_v, 38), FONT, FS_MED, C_AMBER, 1, cv2.LINE_AA)
+    # Line 2: MODE SNAP / MODE PLAY — with flash on toggle
+    mode_val = state["mode"].upper()
+    frames_since = state["frame_count"] - state["mode_flash_frame"]
+    show_val = True
+    if frames_since < 12:
+        show_val = (frames_since // 3) % 2 == 0
+    if show_val:
+        _draw_kv_right(out, "MODE  ", mode_val, w, margin, 38)
+    else:
+        _draw_kv_right(out, "MODE  ", "", w, margin, 38)
+
+    # Line 3: STATE FRAMING
+    _draw_kv_right(out, "STATE  ", state["gesture"].upper(), w, margin, 54)
+
+
+def _draw_kv_right(out: np.ndarray, key: str, val: str, w: int, margin: int, y: int) -> None:
+    """Draw KEY VALUE right-aligned: key in gray, value in amber."""
+    (kw, _), _ = cv2.getTextSize(key, FONT, FS_MED, 1)
+    (vw, _), _ = cv2.getTextSize(val, FONT, FS_MED, 1)
+    xv = w - margin - vw
+    xk = xv - kw
+    cv2.putText(out, key, (xk, y), FONT, FS_MED, C_GRAY_L, 1, cv2.LINE_AA)
+    if val:
+        cv2.putText(out, val, (xv, y), FONT, FS_MED, C_AMBER, 1, cv2.LINE_AA)
 
 
 def _draw_bottom_left_tc(out: np.ndarray, state: dict, h: int) -> None:
@@ -172,7 +205,6 @@ def _draw_bottom_left_tc(out: np.ndarray, state: dict, h: int) -> None:
     tc = f"{hours:02d}:{minutes:02d}:{seconds:02d}:{frames:02d}"
 
     y = h - 10
-    # Draw segments: key gray, value amber
     segments = [
         ("TC  ", C_GRAY_L),
         (tc,     C_AMBER),
@@ -186,24 +218,31 @@ def _draw_bottom_left_tc(out: np.ndarray, state: dict, h: int) -> None:
         x += tw
 
 
-def _draw_fkey_row(out: np.ndarray, state: dict, w: int, h: int) -> None:
-    """[1]CAPTURE [2]INTEL [3]STACK [X]PURGE — right-aligned."""
+def _draw_gesture_legend(out: np.ndarray, state: dict, w: int, h: int) -> None:
+    """Mode-sensitive gesture legend, bottom-right."""
     y = h - 10
     margin = 8
-    gap = 12  # space between function key groups
 
-    # Build segments right to left: (bracket+key, color), (label, color)
-    # [X]PURGE is red throughout
-    groups = [
-        [("[X]", C_RED),      ("PURGE", C_RED)],
-        [("[3]", C_AMBER),    ("STACK", C_GRAY_L)],
-        [("[2]", C_AMBER),    ("INTEL", C_GRAY_L)],
-        [("[1]", C_AMBER),    ("CAPTURE", C_GRAY_L)],
-    ]
+    if state["mode"] == "snap":
+        # FRAME=CROP . 2xPINCH=CAPTURE . PALM=PLAY
+        groups = [
+            [("PALM", C_AMBER), ("=PLAY", C_GRAY_L)],
+            [("2xPINCH", C_AMBER), ("=CAPTURE", C_GRAY_L)],
+            [("FRAME", C_AMBER), ("=CROP", C_GRAY_L)],
+        ]
+    else:
+        # PINCH=GRAB . FIST=CRUSH . PALM=SNAP
+        groups = [
+            [("PALM", C_AMBER), ("=SNAP", C_GRAY_L)],
+            [("FIST", C_AMBER), ("=CRUSH", C_GRAY_L)],
+            [("PINCH", C_AMBER), ("=GRAB", C_GRAY_L)],
+        ]
+
+    sep = "  .  "
+    (sep_w, _), _ = cv2.getTextSize(sep, FONT, FS_SM, 1)
 
     x = w - margin
-    for group in groups:
-        # Measure total group width
+    for i, group in enumerate(groups):
         group_w = sum(cv2.getTextSize(txt, FONT, FS_SM, 1)[0][0] for txt, _ in group)
         x -= group_w
         cur_x = x
@@ -211,4 +250,6 @@ def _draw_fkey_row(out: np.ndarray, state: dict, w: int, h: int) -> None:
             cv2.putText(out, txt, (cur_x, y), FONT, FS_SM, color, 1, cv2.LINE_AA)
             (tw, _), _ = cv2.getTextSize(txt, FONT, FS_SM, 1)
             cur_x += tw
-        x -= gap
+        if i < len(groups) - 1:
+            x -= sep_w
+            cv2.putText(out, sep, (x, y), FONT, FS_SM, C_GRAY_L, 1, cv2.LINE_AA)
